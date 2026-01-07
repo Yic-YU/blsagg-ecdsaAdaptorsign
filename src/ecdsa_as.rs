@@ -4,6 +4,7 @@ use k256::{
         group::prime::PrimeCurveAffine,
         ops::Reduce,
         point::AffineCoordinates,
+        sec1::ToEncodedPoint,
         Field, ProjectivePoint,
     },
     AffinePoint, Scalar, Secp256k1, U256,
@@ -13,8 +14,14 @@ use k256::elliptic_curve::Group;
 use sha2::{Digest, Sha256};
 
 pub type Point = ProjectivePoint<Secp256k1>;
-pub type EncSignature = (Point, Point, Scalar);
+pub type EncSignature = (Point, Point, Scalar, DleqProof);
 pub type Signature = (Scalar, Scalar);
+
+#[derive(Clone, Copy, Debug)]
+pub struct DleqProof {
+    pub c: Scalar,
+    pub s: Scalar,
+}
 
 pub fn keygen() -> (Scalar, Point) {
     // 随机生成私钥 sk
@@ -29,7 +36,6 @@ pub fn keygen() -> (Scalar, Point) {
 pub fn enc_sign(sk_s: Scalar, pk_e: Point, message: &[u8]) -> EncSignature {
     // 计算公钥 X = g^x，其中 g 是椭圆曲线的生成元
     let g: AffinePoint = AffinePoint::generator();
-    let _x = g * sk_s;
 
     // Y = pk_e，接收方的公钥
     let y = pk_e;
@@ -50,17 +56,24 @@ pub fn enc_sign(sk_s: Scalar, pk_e: Point, message: &[u8]) -> EncSignature {
     let h_m = message_hash_to_scalar(message);
     let s_hat = r.invert().unwrap() * (h_m + r_x * sk_s);
 
-    // 返回加密签名 σ̂ = (R, R̂, ŝ)
-    (r_point, r_hat, s_hat)
+    // 生成 DLEQ 证明，绑定 R̂ = rG 与 R = rY
+    let proof = dleq_prove(&y, &r_hat, &r_point, r);
+
+    // 返回加密签名 σ̂ = (R, R̂, ŝ, π)
+    (r_point, r_hat, s_hat, proof)
 }
 
-pub fn pre_verify(pk_s: &Point, message: &[u8], enc_sig: EncSignature) -> bool {
-    let (r_point, r_hat, s_hat) = enc_sig;
+pub fn pre_verify(pk_s: &Point, pk_e: &Point, message: &[u8], enc_sig: EncSignature) -> bool {
+    let (r_point, r_hat, s_hat, proof) = enc_sig;
 
     if bool::from(r_point.is_identity())
         || bool::from(r_hat.is_identity())
         || bool::from(s_hat.is_zero())
     {
+        return false;
+    }
+
+    if !dleq_verify(pk_e, &r_hat, &r_point, &proof) {
         return false;
     }
 
@@ -75,7 +88,7 @@ pub fn pre_verify(pk_s: &Point, message: &[u8], enc_sig: EncSignature) -> bool {
 }
 
 pub fn dec_sig(sk_e: Scalar, enc_sig: EncSignature) -> Signature {
-    let (r_point, _r_hat, s_hat) = enc_sig;
+    let (r_point, _r_hat, s_hat, _proof) = enc_sig;
 
     // 提取接收方私钥 y
     let y = sk_e;
@@ -167,6 +180,52 @@ pub fn ecdsa_verify(pk: &Point, message: &[u8], r: Scalar, s: Scalar) -> bool {
 fn point_x_scalar(point: &Point) -> Scalar {
     let x_u256 = U256::from_be_bytes(*point.to_affine().x().as_ref());
     Scalar::reduce(x_u256)
+}
+
+fn dleq_prove(y: &Point, r_hat: &Point, r_point: &Point, r: Scalar) -> DleqProof {
+    let g = AffinePoint::generator();
+    let w = Scalar::random(OsRng);
+    let a = g * w;
+    let b = *y * w;
+    let c = dleq_challenge(&g, y, r_hat, r_point, &a, &b);
+    let s = w + c * r;
+
+    DleqProof { c, s }
+}
+
+fn dleq_verify(y: &Point, r_hat: &Point, r_point: &Point, proof: &DleqProof) -> bool {
+    if bool::from(y.is_identity()) {
+        return false;
+    }
+
+    let g = AffinePoint::generator();
+    let a = g * proof.s - *r_hat * proof.c;
+    let b = *y * proof.s - *r_point * proof.c;
+    let c = dleq_challenge(&g, y, r_hat, r_point, &a, &b);
+
+    c == proof.c
+}
+
+fn dleq_challenge(
+    g: &AffinePoint,
+    y: &Point,
+    r_hat: &Point,
+    r_point: &Point,
+    a: &Point,
+    b: &Point,
+) -> Scalar {
+    let mut hasher = Sha256::new();
+    hasher.update(b"DLEQ-secp256k1");
+    hasher.update(g.to_encoded_point(true).as_bytes());
+    hasher.update(y.to_affine().to_encoded_point(true).as_bytes());
+    hasher.update(r_hat.to_affine().to_encoded_point(true).as_bytes());
+    hasher.update(r_point.to_affine().to_encoded_point(true).as_bytes());
+    hasher.update(a.to_affine().to_encoded_point(true).as_bytes());
+    hasher.update(b.to_affine().to_encoded_point(true).as_bytes());
+
+    let digest = hasher.finalize();
+    let digest_u256 = U256::from_be_bytes(*digest.as_ref());
+    Scalar::reduce(digest_u256)
 }
 
 fn message_hash_to_scalar(message: &[u8]) -> Scalar {

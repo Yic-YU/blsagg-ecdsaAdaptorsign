@@ -10,7 +10,7 @@ fn adaptor_signature_roundtrip() {
     let message = b"adaptor signature test";
 
     let enc_sig = enc_sign(sk_s, pk_e, message);
-    assert!(pre_verify(&pk_s, message, enc_sig));
+    assert!(pre_verify(&pk_s, &pk_e, message, enc_sig));
 
     let sig = dec_sig(sk_e, enc_sig);
     assert!(ecdsa_verify(&pk_s, message, sig.0, sig.1));
@@ -29,7 +29,7 @@ fn pre_verify_rejects_wrong_message() {
     let other_message = b"message b";
 
     let enc_sig = enc_sign(sk_s, pk_e, message);
-    assert!(!pre_verify(&pk_s, other_message, enc_sig));
+    assert!(!pre_verify(&pk_s, &pk_e, other_message, enc_sig));
 }
 
 #[test]
