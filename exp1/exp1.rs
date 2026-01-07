@@ -20,17 +20,20 @@ mod adaptor_protocol {
             let setup = setup(&mut rng);
             let id_f = b"file-001";
             // 数据块数量必须大于挑战数量，保证索引有效。
-            let num_blocks = 120;
+            let num_blocks = 20;
             let (data_blocks, tags) = data_outsourcing(id_f, num_blocks, &setup.h2c, setup.sk_p);
             // 挑战大小固定为 100，便于对比不同实验。
             let challenge_size = 20;
+            let challenge_start = Instant::now();
             let challenge_indices: Vec<usize> = (0..challenge_size).collect();
             let challenge_coeffs: Vec<Fr> = (0..challenge_size)
                 .map(|i| Fr::from((i as u64) + 2))
                 .collect();
+            let challenge_elapsed = challenge_start.elapsed();
             let msg_tx = b"pay storage fee";
 
             // 预签名由审计方生成，存储方收到挑战与预签名后开始计时。
+            let pre_sign_start = Instant::now();
             let (_v_auditor, y, r_x, s_pre, r) = audit_pre_signature(
                 &tags,
                 &challenge_indices,
@@ -39,6 +42,7 @@ mod adaptor_protocol {
                 setup.sk_pay,
                 msg_tx,
             );
+            let pre_sign_elapsed = pre_sign_start.elapsed();
 
             // 分段计时：聚合 -> 配对 -> H3 -> 解锁签名
             let h2c = G1HashToCurve::new(b"paper_adaptor_h1_dst").unwrap();
@@ -78,9 +82,21 @@ mod adaptor_protocol {
             let s_final = s_pre * y_prime.invert().unwrap();
             let unlock_elapsed = unlock_start.elapsed();
 
-            let total =
-                agg_elapsed + pairing_elapsed + h3_elapsed + dleq_verify_elapsed + unlock_elapsed;
+            let proof_elapsed = agg_elapsed + pairing_elapsed + h3_elapsed;
+            let total = challenge_elapsed
+                + pre_sign_elapsed
+                + dleq_verify_elapsed
+                + proof_elapsed
+                + unlock_elapsed;
 
+            println!(
+                "适配器协议-挑战生成耗时: {:?} (挑战数: {})",
+                challenge_elapsed, challenge_size
+            );
+            println!(
+                "适配器协议-预签名生成耗时: {:?} (挑战数: {})",
+                pre_sign_elapsed, challenge_size
+            );
             println!(
                 "适配器协议-聚合耗时: {:?} (挑战数: {})",
                 agg_elapsed, challenge_size
@@ -100,6 +116,10 @@ mod adaptor_protocol {
             println!(
                 "适配器协议-DLEQ验证耗时: {:?} (挑战数: {})",
                 dleq_verify_elapsed, challenge_size
+            );
+            println!(
+                "适配器协议-证明生成耗时: {:?} (挑战数: {})",
+                proof_elapsed, challenge_size
             );
             println!(
                 "适配器协议-解锁耗时: {:?} (挑战数: {})",
@@ -135,15 +155,17 @@ mod traditional_audit {
             let mut rng = ark_std::test_rng();
             let (x, g2_gen, pk_p) = keygen(&mut rng);
             // 与适配器测试保持一致的数据块数量。
-            let num_blocks = 120;
+            let num_blocks = 20;
             let id_f = b"file-001";
             let (data_blocks, tags) = generate_data_and_tags(num_blocks, &mut rng, x, id_f);
             // 挑战数量与适配器测试保持一致，确保可对比。
             let challenge_size = 20;
+            let challenge_start = Instant::now();
             let challenge_indices: Vec<usize> = (0..challenge_size).collect();
             let challenge_coeffs: Vec<Fr> = (0..challenge_size)
                 .map(|i| Fr::from((i as u64) + 2))
                 .collect();
+            let challenge_elapsed = challenge_start.elapsed();
 
             // -------- 存储方细粒度计时 --------
             let storage_agg_start = Instant::now();
@@ -188,6 +210,17 @@ mod traditional_audit {
             let _y_auditor = sha2::Sha256::digest(&bytes_auditor);
             let verify_h3_elapsed = verify_h3_start.elapsed();
 
+            let storage_total = storage_agg_elapsed + storage_pairing_elapsed + storage_h3_elapsed;
+            let verify_total = verify_agg_elapsed + verify_pairing_elapsed + verify_h3_elapsed;
+            let compare_start = Instant::now();
+            let is_equal = bytes_storage == bytes_auditor;
+            let compare_elapsed = compare_start.elapsed();
+            let verify_equal_total = verify_total + compare_elapsed;
+
+            println!(
+                "传统方案-挑战生成耗时: {:?} (挑战数: {})",
+                challenge_elapsed, challenge_size
+            );
             println!(
                 "传统方案-存储方聚合耗时: {:?} (挑战数: {})",
                 storage_agg_elapsed, challenge_size
@@ -201,6 +234,10 @@ mod traditional_audit {
                 storage_h3_elapsed, challenge_size
             );
             println!(
+                "传统方案-存储方证明生成耗时: {:?} (挑战数: {})",
+                storage_total, challenge_size
+            );
+            println!(
                 "传统方案-验证方聚合耗时: {:?} (挑战数: {})",
                 verify_agg_elapsed, challenge_size
             );
@@ -212,9 +249,13 @@ mod traditional_audit {
                 "传统方案-验证方H3耗时: {:?} (挑战数: {})",
                 verify_h3_elapsed, challenge_size
             );
+            println!(
+                "传统方案-验证方验证相等耗时: {:?} (挑战数: {})",
+                verify_equal_total, challenge_size
+            );
 
             // 结果一致性校验：证明与验证应得到相同字节序列。
-            assert_eq!(bytes_storage, bytes_auditor);
+            assert!(is_equal);
         }
     }
 }

@@ -4,3 +4,7 @@ pub mod audit;
 #[cfg(test)]
 #[path = "../exp1/exp1.rs"]
 mod cfg_test;
+
+#[cfg(test)]
+#[path = "../exp2/exp2.rs"]
+mod cfg_test_exp2;
