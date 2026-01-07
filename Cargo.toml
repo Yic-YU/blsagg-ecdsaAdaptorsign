@@ -1,0 +1,25 @@
+[package]
+name = "test2"
+version = "0.1.0"
+edition = "2024"
+
+
+[dependencies]
+# 核心曲线库 (BLS12-381)
+ark-bls12-381 = "0.4.0"
+# 基础定义 (Field, Group, Pairing)
+ark-ec = "0.4.0"
+ark-ff = "0.4.0"
+ark-std = "0.4.0"
+# 关键：必须要引入这个库才能使用 serialize_compressed
+ark-serialize = "0.4.0"
+# 用于最后的 Hash 计算
+sha2 = "0.10"
+# 用于十六进制输出
+hex = "0.4"
+#适配器签名
+k256 = "0.13.3"
+sha2 = "0.10"
+rand = "0.8"
+secp256k1 = { git = "https://github.com/geneferneau/rust-secp256k1", branch = "adaptor", default-features = false, features = [ "bitcoin_hashes" ] }
+
