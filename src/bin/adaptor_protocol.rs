@@ -124,32 +124,30 @@ fn setup(rng: &mut impl Rng) -> Setup {
     }
 }
 
-// 数据外包与标签生成：输出 m_i、H1(id||i)、以及 σ_i。
+// 数据外包与标签生成：输出原始数据块与标签 σ_i。
 fn data_outsourcing(
     id_f: &[u8],
     num_blocks: usize,
     h2c: &G1HashToCurve,
     sk_p: Fr,
-) -> (Vec<Fr>, Vec<G1Projective>, Vec<G1Projective>) {
+) -> (Vec<Vec<u8>>, Vec<G1Projective>) {
     let g1_gen = G1Projective::generator();
-    let mut m_values: Vec<Fr> = Vec::new();
-    let mut h1_points: Vec<G1Projective> = Vec::new();
+    let mut data_blocks: Vec<Vec<u8>> = Vec::new();
     let mut tags: Vec<G1Projective> = Vec::new();
 
     for i in 0..num_blocks {
-        let data = format!("block-{}", i);
-        let m_i = hash_to_fr(data.as_bytes());
+        let data = format!("block-{}", i).into_bytes();
+        let m_i = hash_to_fr(&data);
         let h1_i = h1(h2c, id_f, i as u64);
         // σ_i = (H1(id_F || i) + m_i * g1)^{sk_P}
         // 其中 g1^{m_i} 在加法群中对应 m_i * g1。
         let sigma_i = (h1_i + g1_gen.mul(m_i)).mul(sk_p);
 
-        m_values.push(m_i);
-        h1_points.push(h1_i);
+        data_blocks.push(data);
         tags.push(sigma_i);
     }
 
-    (m_values, h1_points, tags)
+    (data_blocks, tags)
 }
 
 // 生成挑战集合 I 与系数 {v_i}（使用可控随机种子）。
@@ -166,7 +164,7 @@ fn generate_challenge(num_blocks: usize) -> (Vec<usize>, Vec<Fr>) {
     (challenge_indices, challenge_coeffs)
 }
 
-// 审计者计算 V 与预签名，输出 (V, y, R'_x, s_pre)。
+// 审计者计算 V 与预签名，输出 (V, y, R'_x, s_pre, r)。
 fn audit_pre_signature(
     tags: &[G1Projective],
     challenge_indices: &[usize],
@@ -174,7 +172,13 @@ fn audit_pre_signature(
     g2_gen: G2Projective,
     sk_pay: SecpScalar,
     msg_tx: &[u8],
-) -> (PairingOutput<Bls12_381>, SecpScalar, SecpScalar, SecpScalar) {
+) -> (
+    PairingOutput<Bls12_381>,
+    SecpScalar,
+    SecpScalar,
+    SecpScalar,
+    SecpScalar,
+) {
     // σ_agg = ∑ v_i * σ_i
     // 说明：先在 G1 内聚合，避免逐项做配对，提高效率。
     let mut sigma_agg = G1Projective::zero();
@@ -197,24 +201,28 @@ fn audit_pre_signature(
     let e = hash_to_scalar_secp(msg_tx);
     let s_pre = r.invert().unwrap() * (e + r_x * sk_pay);
 
-    (v_auditor, y, r_x, s_pre)
+    (v_auditor, y, r_x, s_pre, r)
 }
 
 // 存储方生成证明，输出 (V', y')。
 fn storage_proof(
-    m_values: &[Fr],
-    h1_points: &[G1Projective],
+    data_blocks: &[Vec<u8>],
     challenge_indices: &[usize],
     challenge_coeffs: &[Fr],
     pk_p: G2Projective,
+    id_f: &[u8],
 ) -> (PairingOutput<Bls12_381>, SecpScalar) {
+    let h2c = G1HashToCurve::new(b"paper_adaptor_h1_dst").unwrap();
     let g1_gen = G1Projective::generator();
     // P_agg = ∑ v_i * (H1(id_F || i) + m_i * g1)
     // 存储方计算聚合后再配对，避免多次配对。
     let mut p_agg = G1Projective::zero();
     for (&idx, v) in challenge_indices.iter().zip(challenge_coeffs.iter()) {
         // (H1(id_F || i) + m_i * g1)^{v_i}
-        let p_i = h1_points[idx] + g1_gen.mul(m_values[idx]);
+        let data = &data_blocks[idx];
+        let m_i = hash_to_fr(data);
+        let h1_i = h1(&h2c, id_f, idx as u64);
+        let p_i = h1_i + g1_gen.mul(m_i);
         p_agg += p_i.mul(*v);
     }
     // V' = e(P_agg, pk_P)，y' = H3(V')
@@ -253,7 +261,7 @@ fn main() {
     // ------------------------------------------------------------
     let id_f = b"file-001";
     let num_blocks = 6;
-    let (m_values, h1_points, tags) = data_outsourcing(id_f, num_blocks, &setup.h2c, setup.sk_p);
+    let (data_blocks, tags) = data_outsourcing(id_f, num_blocks, &setup.h2c, setup.sk_p);
 
     println!(">>> Tags generated: {}", tags.len());
 
@@ -262,7 +270,7 @@ fn main() {
     // ------------------------------------------------------------
     let (challenge_indices, challenge_coeffs) = generate_challenge(num_blocks);
     let msg_tx = b"pay storage fee";
-    let (v_auditor, y, r_x, s_pre) = audit_pre_signature(
+    let (v_auditor, y, r_x, s_pre, _r) = audit_pre_signature(
         &tags,
         &challenge_indices,
         &challenge_coeffs,
@@ -277,11 +285,11 @@ fn main() {
     // 4. Proof Generation (StorageSatellite)
     // ------------------------------------------------------------
     let (v_storage, y_prime) = storage_proof(
-        &m_values,
-        &h1_points,
+        &data_blocks,
         &challenge_indices,
         &challenge_coeffs,
         setup.pk_p,
+        id_f,
     );
 
     println!("V == V' ? {}", v_auditor == v_storage);
@@ -299,23 +307,23 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn prepare(num_blocks: usize) -> (Setup, Vec<Fr>, Vec<G1Projective>, Vec<G1Projective>) {
+    fn prepare(num_blocks: usize) -> (Setup, Vec<Vec<u8>>, Vec<G1Projective>) {
         let mut rng = ark_std::test_rng();
         let setup = setup(&mut rng);
         let id_f = b"file-001";
-        let (m_values, h1_points, tags) =
-            data_outsourcing(id_f, num_blocks, &setup.h2c, setup.sk_p);
-        (setup, m_values, h1_points, tags)
+        let (data_blocks, tags) = data_outsourcing(id_f, num_blocks, &setup.h2c, setup.sk_p);
+        (setup, data_blocks, tags)
     }
 
     #[test]
     fn protocol_single_challenge_ok() {
-        let (setup, m_values, h1_points, tags) = prepare(4);
+        let (setup, data_blocks, tags) = prepare(4);
         let challenge_indices = vec![1usize];
         let challenge_coeffs = vec![Fr::from(7u64)];
         let msg_tx = b"pay storage fee";
+        let id_f = b"file-001";
 
-        let (v_auditor, y, r_x, s_pre) = audit_pre_signature(
+        let (v_auditor, y, r_x, s_pre, _r) = audit_pre_signature(
             &tags,
             &challenge_indices,
             &challenge_coeffs,
@@ -324,11 +332,11 @@ mod tests {
             msg_tx,
         );
         let (v_storage, y_prime) = storage_proof(
-            &m_values,
-            &h1_points,
+            &data_blocks,
             &challenge_indices,
             &challenge_coeffs,
             setup.pk_p,
+            id_f,
         );
 
         assert_eq!(v_auditor, v_storage);
@@ -339,14 +347,15 @@ mod tests {
     #[test]
     fn protocol_full_challenge_ok() {
         let num_blocks = 5;
-        let (setup, m_values, h1_points, tags) = prepare(num_blocks);
+        let (setup, data_blocks, tags) = prepare(num_blocks);
         let challenge_indices: Vec<usize> = (0..num_blocks).collect();
         let challenge_coeffs: Vec<Fr> = (0..num_blocks)
             .map(|i| Fr::from((i as u64) + 2))
             .collect();
         let msg_tx = b"pay storage fee";
+        let id_f = b"file-001";
 
-        let (v_auditor, y, r_x, s_pre) = audit_pre_signature(
+        let (v_auditor, y, r_x, s_pre, _r) = audit_pre_signature(
             &tags,
             &challenge_indices,
             &challenge_coeffs,
@@ -355,11 +364,11 @@ mod tests {
             msg_tx,
         );
         let (v_storage, y_prime) = storage_proof(
-            &m_values,
-            &h1_points,
+            &data_blocks,
             &challenge_indices,
             &challenge_coeffs,
             setup.pk_p,
+            id_f,
         );
 
         assert_eq!(v_auditor, v_storage);
@@ -369,13 +378,14 @@ mod tests {
 
     #[test]
     fn wrong_message_fails() {
-        let (setup, m_values, h1_points, tags) = prepare(4);
+        let (setup, data_blocks, tags) = prepare(4);
         let challenge_indices = vec![0usize, 2usize];
         let challenge_coeffs = vec![Fr::from(3u64), Fr::from(5u64)];
         let msg_tx = b"pay storage fee";
         let msg_tx_other = b"pay storage fee!";
+        let id_f = b"file-001";
 
-        let (_v_auditor, _y, r_x, s_pre) = audit_pre_signature(
+        let (_v_auditor, _y, r_x, s_pre, _r) = audit_pre_signature(
             &tags,
             &challenge_indices,
             &challenge_coeffs,
@@ -384,11 +394,11 @@ mod tests {
             msg_tx,
         );
         let (_v_storage, y_prime) = storage_proof(
-            &m_values,
-            &h1_points,
+            &data_blocks,
             &challenge_indices,
             &challenge_coeffs,
             setup.pk_p,
+            id_f,
         );
 
         assert!(!unlock_and_verify(
@@ -402,12 +412,13 @@ mod tests {
 
     #[test]
     fn tampered_challenge_fails() {
-        let (setup, m_values, h1_points, tags) = prepare(4);
+        let (setup, data_blocks, tags) = prepare(4);
         let challenge_indices = vec![0usize, 2usize];
         let challenge_coeffs = vec![Fr::from(3u64), Fr::from(5u64)];
         let msg_tx = b"pay storage fee";
+        let id_f = b"file-001";
 
-        let (v_auditor, y, r_x, s_pre) = audit_pre_signature(
+        let (v_auditor, y, r_x, s_pre, _r) = audit_pre_signature(
             &tags,
             &challenge_indices,
             &challenge_coeffs,
@@ -419,11 +430,11 @@ mod tests {
         let mut tampered = challenge_coeffs.clone();
         tampered[0] += Fr::from(1u64);
         let (v_storage, y_prime) = storage_proof(
-            &m_values,
-            &h1_points,
+            &data_blocks,
             &challenge_indices,
             &tampered,
             setup.pk_p,
+            id_f,
         );
 
         assert_ne!(v_auditor, v_storage);

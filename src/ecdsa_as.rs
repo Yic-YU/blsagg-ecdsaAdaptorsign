@@ -182,7 +182,7 @@ fn point_x_scalar(point: &Point) -> Scalar {
     Scalar::reduce(x_u256)
 }
 
-fn dleq_prove(y: &Point, r_hat: &Point, r_point: &Point, r: Scalar) -> DleqProof {
+pub fn dleq_prove(y: &Point, r_hat: &Point, r_point: &Point, r: Scalar) -> DleqProof {
     let g = AffinePoint::generator();
     let w = Scalar::random(OsRng);
     let a = g * w;
@@ -193,7 +193,7 @@ fn dleq_prove(y: &Point, r_hat: &Point, r_point: &Point, r: Scalar) -> DleqProof
     DleqProof { c, s }
 }
 
-fn dleq_verify(y: &Point, r_hat: &Point, r_point: &Point, proof: &DleqProof) -> bool {
+pub fn dleq_verify(y: &Point, r_hat: &Point, r_point: &Point, proof: &DleqProof) -> bool {
     if bool::from(y.is_identity()) {
         return false;
     }

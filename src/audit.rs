@@ -6,7 +6,7 @@ use ark_ec::{
     pairing::Pairing,
     CurveGroup, Group,
 };
-use ark_ff::{field_hashers::DefaultFieldHasher, UniformRand}; // 移除了未使用的 Field
+use ark_ff::{field_hashers::DefaultFieldHasher, PrimeField, UniformRand}; // 移除了未使用的 Field
 use ark_serialize::CanonicalSerialize;
 use sha2::{Digest, Sha256};
 use std::{fs, ops::Mul};
@@ -20,6 +20,20 @@ type G1HashToCurve = MapToCurveBasedHasher<
     DefaultFieldHasher<Sha256, 128>,
     WBMap<g1::Config>,
 >;
+
+// H(m) -> Fr，对应论文中 m_i 的标量化（把数据块映射到标量域 Z_q）。
+fn hash_to_fr(message: &[u8]) -> Fr {
+    let digest = Sha256::digest(message);
+    Fr::from_be_bytes_mod_order(digest.as_ref())
+}
+
+// H1(id_F || i) -> G1（哈希到曲线点）。
+fn h1(h2c: &G1HashToCurve, id_f: &[u8], index: u64) -> G1Projective {
+    let mut msg = Vec::new();
+    msg.extend_from_slice(id_f);
+    msg.extend_from_slice(&index.to_be_bytes());
+    h2c.hash(&msg).unwrap().into()
+}
 
 // 读取或生成数据块（每行一个 hex），不足则随机填充并写回文件。
 fn load_or_create_data_blocks(path: &str, desired_blocks: usize, rng: &mut impl RngCore) -> Vec<Vec<u8>> {
@@ -55,31 +69,35 @@ fn keygen(rng: &mut impl RngCore) -> (Fr, G2Projective, G2Projective) {
     (x, g2_gen, pk)
 }
 
-// 根据数据块生成 H(m_i) 与标签 sigma_i = x * H(m_i)。
+// 根据数据块生成标签 sigma_i = x * (H1(id_F||i) + m_i * g1)。
+// 返回：原始数据块（给存储方）与标签（给审计方）。
 fn generate_data_and_tags(
     num_blocks: usize,
     rng: &mut impl RngCore,
     x: Fr,
-) -> (Vec<G1Projective>, Vec<G1Projective>) {
+    id_f: &[u8],
+) -> (Vec<Vec<u8>>, Vec<G1Projective>) {
     let data_path = concat!(env!("CARGO_MANIFEST_DIR"), "/data_blocks.txt");
     let data_blocks = load_or_create_data_blocks(data_path, num_blocks, rng);
     let h2c = G1HashToCurve::new(b"arkbls12_381_test2_dst").unwrap();
-    let mut data_hashes: Vec<G1Projective> = Vec::new();
+    let g1_gen = G1Projective::generator();
     let mut tags: Vec<G1Projective> = Vec::new();
 
     for i in 0..num_blocks {
         let data = &data_blocks[i];
-        let h_m: G1Projective = h2c.hash(data).unwrap().into();
-        data_hashes.push(h_m);
+        let m_i = hash_to_fr(data);
+        let h1_i = h1(&h2c, id_f, i as u64);
+        // P_i = H1(id_F || i) + m_i * g1
+        let p_i = h1_i + g1_gen.mul(m_i);
+        // sigma_i = x * P_i
+        let sigma = p_i.mul(x);
 
-        // 用户生成标签：sigma_i = x * H(m_i)
-        let sigma = h_m.mul(x);
         tags.push(sigma);
 
-        println!("Block {}: data(hash-to-curve) 与标签已生成", i);
+        println!("Block {}: 标签已生成", i);
     }
 
-    (data_hashes, tags)
+    (data_blocks, tags)
 }
 
 // 生成随机挑战：索引与系数 v_i。
@@ -125,20 +143,26 @@ fn auditor_compute(
     bytes_auditor
 }
 
-// 存储方聚合数据哈希并计算配对结果的序列化字节。
+// 存储方基于本地完整数据计算 P_i 并聚合，随后计算配对结果。
 fn storage_compute(
-    data_hashes: &[G1Projective],
+    data_blocks: &[Vec<u8>],
     challenge_indices: &[usize],
     challenge_coeffs: &[Fr],
     pk: G2Projective,
+    id_f: &[u8],
 ) -> Vec<u8> {
     println!("--- 开始: 存储方计算 (Storage) ---");
 
+    let h2c = G1HashToCurve::new(b"arkbls12_381_test2_dst").unwrap();
+    let g1_gen = G1Projective::generator();
     let mut m_agg = G1Projective::zero();
     for (&idx, v) in challenge_indices.iter().zip(challenge_coeffs.iter()) {
-        let h_m = data_hashes[idx];
-        // m_agg += v * H(m)
-        m_agg += h_m.mul(*v);
+        let data = &data_blocks[idx];
+        let m_i = hash_to_fr(data);
+        let h1_i = h1(&h2c, id_f, idx as u64);
+        let p_i = h1_i + g1_gen.mul(m_i);
+        // m_agg += v * P_i
+        m_agg += p_i.mul(*v);
     }
 
     let v_storage = Bls12_381::pairing(m_agg.into_affine(), pk.into_affine());
@@ -185,7 +209,8 @@ pub fn run_audit() {
 
     // 0.2 生成数据块与标签
     let num_blocks = 8;
-    let (data_hashes, tags) = generate_data_and_tags(num_blocks, &mut rng, x);
+    let id_f = b"file-001";
+    let (data_blocks, tags) = generate_data_and_tags(num_blocks, &mut rng, x, id_f);
 
     // 0.3 生成挑战 (Challenge)
     let (challenge_indices, challenge_coeffs) = generate_challenge(num_blocks, &mut rng);
@@ -209,10 +234,11 @@ pub fn run_audit() {
     // 2. 存储方 (Storage) 计算逻辑 (优化版)
     // ------------------------------------------------------------
     let bytes_storage = storage_compute(
-        &data_hashes,
+        &data_blocks,
         &challenge_indices,
         &challenge_coeffs,
         pk,
+        id_f,
     );
 
     // ------------------------------------------------------------
