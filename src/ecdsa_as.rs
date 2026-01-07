@@ -1,10 +1,12 @@
-use error::Error;
+use std::error;
+
+
 use k256::{elliptic_curve::{bigint::Encoding, group::prime::PrimeCurveAffine, ops::Reduce, point::AffineCoordinates, Field, ProjectivePoint }, AffinePoint, Scalar, Secp256k1, U256};
 use rand::rngs::OsRng;
 use sha2::{Sha256, Digest};
 
 
-fn main() {
+fn ecdsa_as() {
     // 生成签名者Alice的私钥 sk_S 和公钥 pk_S
     let (sk_s, pk_s) = keygen();
     // 生成接收方Bob的私钥 sk_E 和公钥 pk_E

@@ -19,7 +19,7 @@ sha2 = "0.10"
 hex = "0.4"
 #适配器签名
 k256 = "0.13.3"
-sha2 = "0.10"
+
 rand = "0.8"
 secp256k1 = { git = "https://github.com/geneferneau/rust-secp256k1", branch = "adaptor", default-features = false, features = [ "bitcoin_hashes" ] }
 
